@@ -36,4 +36,4 @@ workflow, distribution routes and troubleshooting are in **[PROCEDURE.md](PROCED
 
 Everything runs client-side in JavaScript. These are screening tools: confirm final
 wetting-front geometry with an axisymmetric Richards solution. See Part F of
-PROCEDURE.md for the stated assumptions and the limits of the browser-only design.
+USER_MANUAL.md for the stated assumptions and the limits of the browser-only design.
