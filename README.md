@@ -37,3 +37,24 @@ workflow, distribution routes and troubleshooting are in **[USER_MANUAL.md](USER
 Everything runs client-side in JavaScript. These are screening tools: confirm final
 wetting-front geometry with an axisymmetric Richards solution. See Part F of
 USER_MANUAL.md for the stated assumptions and the limits of the browser-only design.
+
+## Author
+
+**Hadi Hamaaziz Muhammed**
+PhD candidate, Universität Osnabrück / Hochschule Osnabrück
+hadi.azizm@gmail.com
+
+Developed alongside the doctoral thesis *Optimization of Irrigation Strategy for
+Wood Fibre-Based Substrates*.
+
+## Citation
+
+If you use this tool in published work, please cite it as:
+
+> Muhammed, H.H. (2026). *Drip Irrigation Design Workbench* [Computer software].
+> https://github.com/hmuhamme/drip-design
+> https://drip-design-osnabrueck.netlify.app/
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).
