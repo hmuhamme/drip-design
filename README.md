@@ -22,7 +22,7 @@ npm run dev
 ```
 
 Full instructions, an acceptance test with reference values, the recommended design
-workflow, distribution routes and troubleshooting are in **[PROCEDURE.md](PROCEDURE.md)**.
+workflow, distribution routes and troubleshooting are in **[USER_MANUAL.md](USER_MANUAL.md)**.
 
 ## Build
 
