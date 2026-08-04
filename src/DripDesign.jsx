@@ -311,6 +311,7 @@ export default function DripDesign() {
   const [zrMin, setZrMin] = useState(0.15);
   const [rootD, setRootD] = useState(0.45);
   const [pDep, setPDep] = useState(0.4);
+  const [adjustP, setAdjustP] = useState(true);
   const [fwMan, setFwMan] = useState(0.5);
   const [drInit, setDrInit] = useState(0);
   const [nBlocksTotal, setNBlocksTotal] = useState(4);
@@ -463,7 +464,9 @@ export default function DripDesign() {
 
       const Zr = zrAt(t, kc, zrMin, rootD);
       const TAW = 1000 * S.awc * Zr * fwMan;
-      const pAdj = Math.min(0.8, Math.max(0.1, pDep + 0.04 * (5 - etc)));
+      const pAdj = adjustP
+        ? Math.min(0.8, Math.max(0.1, pDep + 0.04 * (5 - etc)))
+        : pDep;
       const RAW = pAdj * TAW;
 
       Dr = Dr + etc - rainDay;
@@ -490,6 +493,7 @@ export default function DripDesign() {
         d: t + 1, date: date.toISOString().slice(0, 10), kc: +kcT.toFixed(3),
         etc: +etc.toFixed(2), rain: +rainDay.toFixed(2), irr: +irrGross.toFixed(1),
         Dr: +Dr.toFixed(1), RAW: +RAW.toFixed(1), TAW: +TAW.toFixed(1), Zr: +Zr.toFixed(3),
+        pAdj: +pAdj.toFixed(3),
       });
     }
 
@@ -544,11 +548,14 @@ export default function DripDesign() {
       totETc, totRain, totGross, totNet, designGross, designHours, minHours, meanInterval,
       shifts, hoursPerBlock, maxGrossPerDay, hoursPerDayPeak, effy, seasonLen,
       limitedDays, stressDays, deficitTot, maxDr, envelope,
+      pMin: Math.min(...daily.map((r) => r.pAdj)),
+      pMax: Math.max(...daily.map((r) => r.pAdj)),
+      pMean: daily.reduce((a, r) => a + r.pAdj, 0) / Math.max(daily.length, 1),
       hoursFor, rateFor, emitterFor, peakDailyGross,
     };
   }, [startDate, srcMode, pasted, kc, et0Monthly, rainMonthly, zrMin, rootD, pDep, fwMan,
       drInit, S.awc, H.EU, H.appRate, LR, designRule, ETcManual, nBlocksTotal, nBlocks,
-      maxHoursDay, Se, Sr, nEmit]);
+      maxHoursDay, Se, Sr, nEmit, adjustP]);
 
   /* -------------------- discharge -> flux -------------------- */
   const FX = useMemo(() => {
@@ -742,7 +749,29 @@ export default function DripDesign() {
               <Panel title="Root zone & management" tone="soil">
                 <Field label="Zr at planting" unit="m" value={zrMin} onChange={setZrMin} step={0.05} />
                 <Field label="Zr maximum" unit="m" value={rootD} onChange={setRootD} step={0.05} />
-                <Field label="Depletion fraction p" unit="–" value={pDep} onChange={setPDep} step={0.05} />
+                <Field label="Depletion fraction p (MAD)" unit="–" value={pDep} onChange={setPDep} step={0.05} />
+                <label className="flex items-start justify-between gap-3 py-1">
+                  <span className="text-xs leading-tight text-slate-600">
+                    Adjust p for daily ETc
+                    <span className="block text-[10px] text-slate-400">FAO-56 Eq. 83</span>
+                  </span>
+                  <input type="checkbox" checked={adjustP} onChange={(e) => setAdjustP(e.target.checked)}
+                         className="mt-0.5 h-4 w-4 shrink-0 accent-cyan-700" />
+                </label>
+                <div className="mb-1 rounded bg-slate-50 px-2 py-1 text-[10px] leading-relaxed text-slate-500">
+                  {adjustP ? (
+                    <>p<sub>adj</sub> = p + 0.04(5 − ETc), clipped to 0.1–0.8.
+                    {" "}Applied this season: <span className="font-mono">{fmt(SCH.pMin, 3)}–{fmt(SCH.pMax, 3)}</span>,
+                    mean <span className="font-mono">{fmt(SCH.pMean, 3)}</span>
+                    {Math.abs(SCH.pMean - pDep) > 0.03 && (
+                      <span className="text-amber-700"> — differs from your {fmt(pDep, 2)} by
+                        {" "}{fmt(100 * (SCH.pMean / Math.max(pDep, 0.01) - 1), 0)} %</span>
+                    )}</>
+                  ) : (
+                    <>Your MAD of <span className="font-mono">{fmt(pDep, 2)}</span> is applied literally on every day.
+                    {" "}RAW = MAD × TAW = <span className="font-mono">{fmt(pDep * 1000 * S.awc * rootD * fwMan, 1)} mm</span> at full root depth.</>
+                  )}
+                </div>
                 <Field label="Managed wetted fraction" unit="–" value={fwMan} onChange={setFwMan} step={0.05} />
                 <Field label="Initial depletion" unit="mm" value={drInit} onChange={setDrInit} step={5} />
                 <Field label="Blocks in system" unit="–" value={nBlocksTotal} onChange={setNBlocksTotal} step={1} />
@@ -1032,8 +1061,10 @@ export default function DripDesign() {
                     </div>
                     <p className="mt-1 text-[11px] leading-relaxed text-slate-600">
                       TAW = 1000·(θ<sub>FC</sub> − θ<sub>WP</sub>)·Z<sub>r</sub>·f<sub>w</sub>, with θ from the retention
-                      curve on the Soil tab. Both thresholds rise as the root zone grows. p is adjusted for the day's
-                      demand as p + 0.04(5 − ETc), so the trigger tightens in hot weather.
+                      curve on the Soil tab. Both thresholds rise as the root zone grows.
+                      {adjustP
+                        ? ` p is adjusted for the day's demand as p + 0.04(5 − ETc), so the trigger tightens in hot weather — this season it ranged ${fmt(SCH.pMin, 2)} to ${fmt(SCH.pMax, 2)} against your entered ${fmt(pDep, 2)}.`
+                        : ` Your MAD of ${fmt(pDep, 2)} is applied literally, unadjusted, so RAW follows only the root-zone growth.`}
                     </p>
                   </Panel>
                 </div>
