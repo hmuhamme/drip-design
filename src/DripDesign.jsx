@@ -312,6 +312,10 @@ export default function DripDesign() {
   const [rootD, setRootD] = useState(0.45);
   const [pDep, setPDep] = useState(0.4);
   const [adjustP, setAdjustP] = useState(true);
+  const [schedMode, setSchedMode] = useState("depletion");
+  const [fixedInterval, setFixedInterval] = useState(2);
+  const [pulsesPerDay, setPulsesPerDay] = useState(1);
+  const [refillTarget, setRefillTarget] = useState(100);
   const [fwMan, setFwMan] = useState(0.5);
   const [drInit, setDrInit] = useState(0);
   const [nBlocksTotal, setNBlocksTotal] = useState(4);
@@ -448,6 +452,7 @@ export default function DripDesign() {
     let Dr = drInit;
     const events = [];
     let limitedDays = 0, stressDays = 0, deficitTot = 0, maxDr = 0;
+    let etcSince = 0;
 
     for (let t = 0; t < nDays; t++) {
       const date = new Date(start.getTime() + t * 86400000);
@@ -471,19 +476,43 @@ export default function DripDesign() {
 
       Dr = Dr + etc - rainDay;
       if (Dr < 0) Dr = 0;
+      etcSince += Math.max(etc - rainDay, 0);
 
       let irrGross = 0, irrHours = 0, limited = false;
-      if (Dr >= RAW && RAW > 0) {
-        const required = Dr / Math.max(effy, 0.01);
-        irrGross = Math.min(required, maxGrossPerDay);
+
+      /* Three scheduling philosophies. All share the same balance; they differ
+         only in WHEN an event fires and HOW MUCH is applied.                  */
+      let fire = false, required = 0;
+      if (schedMode === "depletion") {
+        // FAO-56: wait until depletion reaches readily available water
+        fire = Dr >= RAW && RAW > 0;
+        required = (Dr * (refillTarget / 100)) / Math.max(effy, 0.01);
+      } else if (schedMode === "fixed") {
+        // drip practice: fixed interval, replace what the crop used
+        fire = t % Math.max(1, Math.round(fixedInterval)) === 0 && t > 0;
+        if (fire) {
+          const used = etcSince > 0 ? etcSince : etc * fixedInterval;
+          required = (used * (refillTarget / 100)) / Math.max(effy, 0.01);
+        }
+      } else {
+        // daily: replace yesterday's use every day
+        fire = true;
+        required = (Math.max(etc - rainDay, 0) * (refillTarget / 100)) / Math.max(effy, 0.01);
+      }
+
+      if (fire && required > 0) {
+        const perDay = maxGrossPerDay * Math.max(1, pulsesPerDay);
+        irrGross = Math.min(required, perDay);
         limited = irrGross < required - 1e-9;
         irrHours = irrGross / Math.max(H.appRate, 1e-6);
         Dr = Math.max(0, Dr - irrGross * effy);
         events.push({
           t, date: date.toISOString().slice(0, 10), net: +(irrGross * effy).toFixed(1),
           gross: +irrGross.toFixed(1), hours: +irrHours.toFixed(2), Zr: +Zr.toFixed(2), limited,
+          perPulse: +(irrHours / Math.max(1, pulsesPerDay)).toFixed(2),
         });
         if (limited) { limitedDays++; deficitTot += required - irrGross; }
+        etcSince = 0;
       }
       if (Dr > TAW) Dr = TAW;
       if (Dr > RAW) stressDays++;
@@ -548,6 +577,7 @@ export default function DripDesign() {
       totETc, totRain, totGross, totNet, designGross, designHours, minHours, meanInterval,
       shifts, hoursPerBlock, maxGrossPerDay, hoursPerDayPeak, effy, seasonLen,
       limitedDays, stressDays, deficitTot, maxDr, envelope,
+      schedMode, fixedInterval, pulsesPerDay, refillTarget,
       pMin: Math.min(...daily.map((r) => r.pAdj)),
       pMax: Math.max(...daily.map((r) => r.pAdj)),
       pMean: daily.reduce((a, r) => a + r.pAdj, 0) / Math.max(daily.length, 1),
@@ -555,7 +585,7 @@ export default function DripDesign() {
     };
   }, [startDate, srcMode, pasted, kc, et0Monthly, rainMonthly, zrMin, rootD, pDep, fwMan,
       drInit, S.awc, H.EU, H.appRate, LR, designRule, ETcManual, nBlocksTotal, nBlocks,
-      maxHoursDay, Se, Sr, nEmit, adjustP]);
+      maxHoursDay, Se, Sr, nEmit, adjustP, schedMode, fixedInterval, pulsesPerDay, refillTarget]);
 
   /* -------------------- discharge -> flux -------------------- */
   const FX = useMemo(() => {
@@ -746,6 +776,45 @@ export default function DripDesign() {
                 <MonthGrid values={rainMonthly} onChange={setRainMonthly} step={5} />
               </Panel>
 
+              <Panel title="Scheduling strategy" tone="water">
+                <Select label="Mode" wide value={schedMode} onChange={setSchedMode}
+                  options={["depletion", "fixed", "daily"]}
+                  render={(o) => ({ depletion: "Depletion-triggered", fixed: "Fixed interval", daily: "Daily" }[o])} />
+                {schedMode === "fixed" && (
+                  <Field label="Irrigation interval" unit="d" value={fixedInterval}
+                         onChange={setFixedInterval} step={1} min={1} />
+                )}
+                <Field label="Refill target" unit="%" value={refillTarget} onChange={setRefillTarget} step={5} />
+                <Field label="Pulses per day" unit="–" value={pulsesPerDay} onChange={setPulsesPerDay} step={1} min={1} />
+                <div className="mt-2 rounded bg-slate-50 px-2 py-1 text-[10px] leading-relaxed text-slate-500">
+                  {schedMode === "depletion" && (
+                    <>FAO-56 approach: wait until depletion reaches RAW, then refill. Built for surface and
+                    sprinkler systems that occasionally recharge the whole root zone. The interval follows from the
+                    soil — currently about {fmt(SCH.meanInterval, 1)} d.</>
+                  )}
+                  {schedMode === "fixed" && (
+                    <>Standard drip practice: irrigate every {fmt(fixedInterval, 0)} d and replace what the crop
+                    used, regardless of depletion. Keeps the bulb continuously moist and maintains a leaching flux.
+                    Usual in arid and semi-arid regions, where 1–3 d is typical.</>
+                  )}
+                  {schedMode === "daily" && (
+                    <>High-frequency drip: replace yesterday's use every day. Common on sandy soils, in
+                    greenhouses, and wherever the wetted volume stores too little to carry the crop.</>
+                  )}
+                  {refillTarget !== 100 && (
+                    <span className="mt-1 block text-amber-700">
+                      Refilling to {fmt(refillTarget, 0)} % — deliberate deficit irrigation, so depletion will
+                      accumulate. Watch the stress-days tile.
+                    </span>
+                  )}
+                  {pulsesPerDay > 1 && (
+                    <span className="mt-1 block">
+                      Each event split into {pulsesPerDay} pulses — {fmt(SCH.designHours / pulsesPerDay, 2)} h each
+                      on the largest event. Set the same number on the Wetting front tab to see the bulb effect.
+                    </span>
+                  )}
+                </div>
+              </Panel>
               <Panel title="Root zone & management" tone="soil">
                 <Field label="Zr at planting" unit="m" value={zrMin} onChange={setZrMin} step={0.05} />
                 <Field label="Zr maximum" unit="m" value={rootD} onChange={setRootD} step={0.05} />
@@ -1096,6 +1165,40 @@ export default function DripDesign() {
                   </div>
                 </Panel>
               </div>
+
+              <Panel title="Does the strategy hold up against the water balance?">
+                <div className="grid grid-cols-1 gap-x-6 md:grid-cols-2">
+                  <Check pass={SCH.stressDays === 0}>
+                    {SCH.stressDays === 0
+                      ? "Depletion never exceeded RAW — no crop stress at any point"
+                      : `${SCH.stressDays} day(s) with depletion above RAW. ${
+                          schedMode === "fixed"
+                            ? `Shorten the interval below ${fmt(fixedInterval, 0)} d`
+                            : schedMode === "daily"
+                              ? "Even daily irrigation is not keeping up — raise the refill target or the application rate"
+                              : "Raise the application rate or run more blocks at once"}.`}
+                  </Check>
+                  <Check pass={SCH.limitedDays === 0}>
+                    {SCH.limitedDays === 0
+                      ? "Every scheduled event was delivered in full"
+                      : `${SCH.limitedDays} day(s) capacity-limited, ${fmt(SCH.deficitTot, 1)} mm unmet`}
+                  </Check>
+                  <Check pass={SCH.maxDr <= 1000 * S.awc * rootD * fwMan}>
+                    Peak depletion {fmt(SCH.maxDr, 1)} mm against TAW {fmt(1000 * S.awc * rootD * fwMan, 1)} mm
+                  </Check>
+                  <Check pass={SCH.minHours >= minSetHours}>
+                    Shortest set {fmt(SCH.minHours, 2)} h ≥ {fmt(minSetHours, 2)} h practical minimum
+                    {pulsesPerDay > 1 && ` (${fmt(SCH.minHours / pulsesPerDay, 2)} h per pulse)`}
+                  </Check>
+                </div>
+                <p className="mt-2 text-[11px] leading-relaxed text-slate-600">
+                  {schedMode === "depletion"
+                    ? `The soil is choosing the interval: ${fmt(SCH.meanInterval, 1)} d on average. If that seems long for a drip system, check the managed wetted fraction — values near 1.0 assume full surface wetting and inflate the reservoir. Under drip it should match the wetted fraction P from the bulb, typically 0.2–0.5.`
+                    : schedMode === "fixed"
+                      ? `You are choosing the interval: ${fmt(fixedInterval, 0)} d, ${SCH.events.length} events, mean depth ${fmt(SCH.totGross / Math.max(SCH.events.length, 1), 1)} mm. The balance above is now a check rather than a controller — it confirms the interval you picked is safe, and flags it if not.`
+                      : `Daily replacement, ${SCH.events.length} events, mean depth ${fmt(SCH.totGross / Math.max(SCH.events.length, 1), 1)} mm. Soil storage plays almost no role; the emitter is doing the work each day.`}
+                </p>
+              </Panel>
 
               <Panel title="Sizing versus scheduling">
                 <p className="text-xs leading-relaxed text-slate-600">
