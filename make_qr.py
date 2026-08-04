@@ -14,7 +14,7 @@ import segno
 from PIL import Image, ImageDraw, ImageFont
 
 # ----------------------------- CONFIG -----------------------------------
-URL = "https://drip-design-hadi.netlify.app/"
+URL = "https://drip-design-osnabrueck.netlify.app/"
 
 TITLE = "Drip Irrigation Design Tool"
 SUBTITLE = "Universitat Osnabruck / Hochschule Osnabruck"
