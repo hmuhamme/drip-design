@@ -31,6 +31,23 @@ const SOILS = [
 ];
 
 const LATERAL_ID = [12.2, 13.8, 15.2, 17.0, 19.4, 21.8, 25.6];
+/* Commercial in-line dripline emitter spacings, m */
+const DRIPLINE_SE = [0.10, 0.15, 0.20, 0.25, 0.30, 0.33, 0.40, 0.50, 0.60, 0.75, 1.00];
+/* Real dripline products: [emitter spacing m, nominal discharge L/h].
+   Discharge per metre of lateral stays in the 4-12 L/h/m band that manufacturers
+   actually supply — a close spacing must be paired with a small emitter.        */
+const DRIPLINE_PRODUCTS = [
+  [0.10, 0.4], [0.10, 0.6], [0.10, 1.0],
+  [0.15, 0.6], [0.15, 1.0], [0.15, 1.6],
+  [0.20, 1.0], [0.20, 1.6], [0.20, 2.0],
+  [0.25, 1.0], [0.25, 1.6], [0.25, 2.0],
+  [0.30, 1.6], [0.30, 2.0], [0.30, 2.3],
+  [0.33, 1.6], [0.33, 2.0], [0.33, 2.3],
+  [0.40, 2.0], [0.40, 2.3], [0.40, 3.0],
+  [0.50, 2.3], [0.50, 3.0], [0.50, 4.0],
+  [0.60, 2.3], [0.60, 4.0],
+  [0.75, 4.0], [1.00, 4.0], [1.00, 8.0],
+];
 const PIPE_ID = [25.6, 32.6, 40.8, 51.4, 57.0, 65.0, 73.6, 81.4, 92.0, 103.6, 115.4, 130.8, 147.6];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const MONTH_MID = [15, 45, 74, 105, 135, 166, 196, 227, 258, 288, 319, 349];
@@ -336,7 +353,11 @@ export default function DripDesign() {
   const [r0, setR0] = useState(3.0);
   const [hInit, setHInit] = useState(-800);
   const [hFC, setHFC] = useState(-100);
+  const [hWet, setHWet] = useState(-20);
   const [nPulse, setNPulse] = useState(1);
+  const [ovTarget, setOvTarget] = useState(25);
+  const [ovMode, setOvMode] = useState("area");
+  const [plantSp, setPlantSp] = useState(0.4);
 
   // fertigation
   const [nRate, setNRate] = useState(30);
@@ -351,6 +372,10 @@ export default function DripDesign() {
     const thI = thetaOfH(hInit, soil);
     const thFC = thetaOfH(hFC, soil);
     const thWP = thetaOfH(-15000, soil);
+    const thWet = thetaOfH(hWet, soil);
+    // water content change INSIDE the bulb: near an emitter the soil approaches
+    // saturation, so theta_FC is the wrong reference for coarse materials.
+    const dThetaBulb = Math.max(0.005, thWet - thI);
     const curve = [];
     for (let i = 0; i <= 120; i++) {
       const ah = Math.pow(10, i / 24);
@@ -358,9 +383,10 @@ export default function DripDesign() {
     }
     return {
       m: mOf(soil.n), Ks_cmh, Ks_mh, phi, lambdaC, alphaEff: 1 / lambdaC,
-      thI, thFC, thWP, dTheta: Math.max(0.01, thFC - thI), awc: Math.max(0.01, thFC - thWP), curve,
+      thI, thFC, thWP, thWet, dThetaBulb,
+      dTheta: Math.max(0.01, thFC - thI), awc: Math.max(0.01, thFC - thWP), curve,
     };
-  }, [soil, hInit, hFC]);
+  }, [soil, hInit, hFC, hWet]);
 
   /* -------------------- hydraulic solve -------------------- */
   const H = useMemo(() => {
@@ -533,7 +559,12 @@ export default function DripDesign() {
     const qW = Q_cm3h / (Math.PI * rW * rW);
     const QL = (qn * 1000) / (Se * 100);
     const bHalf = Math.max(r0, rW);
-    return { Q_cm3h, A0, q0, ponding: q0 > S.Ks_cmh, rW, qW, QL, bHalf, qLine: QL / (2 * bHalf), ratio: q0 / S.Ks_cmh };
+    // smallest disc that can take the full discharge under a constant-FLUX bc (q <= Ks)
+    const rMinFlux = Math.sqrt(Q_cm3h / (Math.PI * Math.max(S.Ks_cmh, 1e-9)));
+    const rAt80 = Math.sqrt(Q_cm3h / (Math.PI * Math.max(0.8 * S.Ks_cmh, 1e-9)));
+
+    return { Q_cm3h, A0, q0, ponding: q0 > S.Ks_cmh, rW, qW, QL, bHalf,
+             qLine: QL / (2 * bHalf), ratio: q0 / S.Ks_cmh, rMinFlux, rAt80 };
   }, [qn, r0, Se, S.Ks_cmh, S.alphaEff]);
 
   /* -------------------- wetting front -------------------- */
@@ -546,27 +577,64 @@ export default function DripDesign() {
     const w = nPulse > 1 ? pl.w * Math.pow(nPulse, 0.07) : full.w;
     const z = nPulse > 1 ? pl.z * Math.pow(nPulse, 0.18) : full.z;
     const A = z / Math.max(w / 2, 1e-6);
-    const aMB = Math.pow((3 * Vtot) / (2 * Math.PI * A * S.dTheta), 1 / 3);
-    const merged = Se < w;
+    const aMB = Math.pow((3 * Vtot) / (2 * Math.PI * A * S.dThetaBulb), 1 / 3);
+    // implied volume-averaged water content: the applied water must fit the S&Z bulb
+    const VbulbSZ = (2 / 3) * Math.PI * Math.pow(w / 2, 2) * z;
+    const dThImplied = Vtot / Math.max(VbulbSZ, 1e-9);
+    const satFrac = (S.thI + dThImplied) / Math.max(soil.ts, 1e-6);
+
+    /* When the correlation is geometrically inconsistent, keep its aspect ratio
+       (the shape is the robust part) and rescale so mass balance holds exactly.
+       Delta-theta is taken to field capacity: the drained bulb the roots see
+       between irrigations, which is the design-relevant one.                    */
+    const dThFC = Math.max(0.005, S.thFC - S.thI);
+    const aCorr = Math.pow((3 * Vtot) / (2 * Math.PI * A * dThFC), 1 / 3);
+    const wCorr = 2 * aCorr, zCorr = A * aCorr;
+    const inconsistent = satFrac >= 1.0;
+    // dimensions the rest of the tab should use
+    const wUse = inconsistent ? wCorr : w;
+    const zUse = inconsistent ? zCorr : z;
+    const merged = Se < wUse;
 
     /* Two half-ellipses, semi-axes a = w/2 and b = z, centres Se apart.
-       k = Se/w is the normalised separation.                            */
-    const k = Math.min(1, Se / Math.max(w, 1e-6));
-    const zOv = z * Math.sqrt(Math.max(0, 1 - k * k));      // depth of the merged strip
-    const notch = z - zOv;                                   // dry wedge below the join
-    const wOv = Math.max(0, w - Se);                         // horizontal width of the lens
+       All overlap geometry uses the mass-balance-corrected dimensions when the
+       raw correlation is inconsistent, so spacing advice is never based on a
+       bulb that cannot physically hold the water applied.                     */
+    const kTrue = Se / Math.max(wUse, 1e-6);      // for display
+    const k = Math.min(1, kTrue);                 // clamped, for the geometry formulae
+    const zOv = zUse * Math.sqrt(Math.max(0, 1 - k * k));   // depth of the merged strip
+    const notch = zUse - zOv;                                // dry wedge below the join
+    const wOv = Math.max(0, wUse - Se);                      // horizontal width of the lens
     const areaFrac = k >= 1 ? 0
       : (Math.PI / 2 - k * Math.sqrt(1 - k * k) - Math.asin(k)) / (Math.PI / 2);
     /* spacing that puts the join exactly at the target depth */
     const seForDepth = (target) =>
-      z > target ? w * Math.sqrt(Math.max(0, 1 - Math.pow(target / z, 2))) : 0;
+      zUse > target ? wUse * Math.sqrt(Math.max(0, 1 - Math.pow(target / zUse, 2))) : 0;
+
+    /* --- inverse design: what is needed to hit a target overlap --- */
+    const fovOf = (kk) => (kk >= 1 ? 0
+      : (Math.PI / 2 - kk * Math.sqrt(1 - kk * kk) - Math.asin(kk)) / (Math.PI / 2));
+    // f_ov is monotonically decreasing in k, so bisect
+    const kForArea = (target) => {
+      let a = 0, b = 1;
+      for (let i = 0; i < 80; i++) {
+        const mid = (a + b) / 2;
+        if (fovOf(mid) > target) a = mid; else b = mid;
+      }
+      return (a + b) / 2;
+    };
+    // Schwartzman-Zur sensitivities: w ∝ q^0.39 t^0.22, z ∝ q^0.18 t^0.63
+    const durationFactor = (widthRatio) => Math.pow(widthRatio, 1 / 0.22);
+    const dischargeFactor = (widthRatio) => Math.pow(widthRatio, 1 / 0.39);
 
     return {
       Vtot, w, z, wMB: 2 * aMB, zMB: A * aMB, A, merged,
-      k, zOv, notch, wOv, areaFrac, seForDepth,
-      P: merged ? Math.min(1, w / Sr) : Math.min(1, ((Math.PI * w * w) / 4) / (Se * Sr)),
+      k, kTrue, zOv, notch, wOv, areaFrac, seForDepth,
+      VbulbSZ, dThImplied, satFrac, inconsistent, wCorr, zCorr, dThFC, wUse, zUse,
+      fovOf, kForArea, durationFactor, dischargeFactor,
+      P: merged ? Math.min(1, wUse / Sr) : Math.min(1, ((Math.PI * wUse * wUse) / 4) / (Se * Sr)),
     };
-  }, [SCH.designHours, qn, nPulse, S.Ks_mh, S.dTheta, Se, Sr]);
+  }, [SCH.designHours, qn, nPulse, S.Ks_mh, S.dThetaBulb, S.thI, S.thFC, soil.ts, Se, Sr]);
 
   /* -------------------- fertigation -------------------- */
   const F = useMemo(() => {
@@ -581,6 +649,7 @@ export default function DripDesign() {
       injRate: stockVol / (injMin / 60), waterVol,
       conc: (nutrient * 1e6) / Math.max(waterVol, 1),
       seasonN: nRate * areaBlock * SCH.events.length,
+      seasonNha: nRate * SCH.events.length,
     };
   }, [H, Sr, Llat, nRate, fertN, tankConc, SCH.designHours, SCH.events.length]);
 
@@ -749,9 +818,10 @@ export default function DripDesign() {
                 <Field label="Source radius r₀" unit="cm" value={r0} onChange={setR0} step={0.5} />
                 <Field label="Initial head hᵢ" unit="cm" value={hInit} onChange={setHInit} step={50} />
                 <Field label="Head at field capacity" unit="cm" value={hFC} onChange={setHFC} step={10} />
+                <Field label="Head inside wetted bulb" unit="cm" value={hWet} onChange={setHWet} step={5} />
                 <Field label="Pulses per event" unit="–" value={nPulse} onChange={setNPulse} step={1} min={1} />
                 <div className="mt-2 rounded bg-slate-50 px-2 py-1 font-mono text-[10px] text-slate-500">
-                  θᵢ {fmt(S.thI, 3)} · θ<sub>FC</sub> {fmt(S.thFC, 3)} · θ<sub>WP</sub> {fmt(S.thWP, 3)} · Δθ {fmt(S.dTheta, 3)}
+                  θᵢ {fmt(S.thI, 3)} · θ<sub>wet</sub> {fmt(S.thWet, 3)} · θ<sub>FC</sub> {fmt(S.thFC, 3)} · θ<sub>WP</sub> {fmt(S.thWP, 3)} · Δθ<sub>bulb</sub> {fmt(S.dThetaBulb, 3)}
                 </div>
               </Panel>
             </>
@@ -1058,8 +1128,13 @@ export default function DripDesign() {
                     FX.ponding ? "border-amber-300 bg-amber-50 text-amber-900" : "border-emerald-300 bg-emerald-50 text-emerald-900"}`}>
                     {FX.ponding ? (
                       <><strong>q₀ &gt; Ks — the assumed r₀ cannot absorb this discharge.</strong> Water ponds and the
-                        source spreads. Use a variable-radius saturated disc (h = 0) rather than a constant-flux Neumann
-                        BC, or fix the radius at r_w = {fmt(FX.rW, 2)} cm and apply {fmt(FX.qW, 3)} cm/h.</>
+                        source spreads. Two valid boundary conditions:
+                        <br />• <strong>Constant head</strong> h = 0 over r_w = {fmt(FX.rW, 2)} cm. The mean flux there is
+                        {" "}{fmt(FX.qW, 2)} cm/h, which exceeds Ks legitimately because a saturated disc also draws water
+                        laterally — valid for a head BC only.
+                        <br />• <strong>Constant flux</strong> at q ≤ Ks, which requires r ≥ {fmt(FX.rMinFlux, 2)} cm
+                        (= √(Q/πKs)). At q = {fmt(0.8 * S.Ks_cmh, 2)} cm/h use r = {fmt(FX.rAt80, 2)} cm.
+                        <br />Never impose {fmt(FX.qW, 2)} cm/h as a flux BC — it is above Ks and will not converge.</>
                     ) : (
                       <><strong>q₀ ≤ Ks — no ponding.</strong> A constant-flux Neumann BC of {fmt(FX.q0, 4)} cm/h over
                         r₀ = {fmt(r0, 1)} cm is physically consistent.</>
@@ -1098,36 +1173,78 @@ export default function DripDesign() {
           {tab === "bulb" && (
             <>
               <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-6">
-                <Stat label="Width w (S&Z)" value={fmt(W.w * 100, 0)} unit="cm" />
-                <Stat label="Depth z (S&Z)" value={fmt(W.z * 100, 0)} unit="cm" />
+                <Stat label={W.inconsistent ? "Width w (corrected)" : "Width w (S&Z)"}
+                      value={fmt(W.wUse * 100, 0)} unit="cm" status={W.inconsistent ? "warn" : undefined} />
+                <Stat label={W.inconsistent ? "Depth z (corrected)" : "Depth z (S&Z)"}
+                      value={fmt(W.zUse * 100, 0)} unit="cm" status={W.inconsistent ? "warn" : undefined} />
                 <Stat label="Width (mass bal.)" value={fmt(W.wMB * 100, 0)} unit="cm" />
                 <Stat label="Depth (mass bal.)" value={fmt(W.zMB * 100, 0)} unit="cm" />
                 <Stat label="Water per emitter" value={fmt(W.Vtot * 1000, 1)} unit="L" />
                 <Stat label="Wetted fraction P" value={fmt(W.P * 100, 0)} unit="%" status={st(W.P >= 0.3, W.P >= 0.2)} />
-                <Stat label="Δθ used" value={fmt(S.dTheta, 3)} unit="–" />
-                <Stat label="Depth / root depth" value={fmt(W.z / rootD, 2)} unit="–" status={st(W.z / rootD <= 1.2, W.z / rootD <= 1.5)} />
+                <Stat label="Δθ in bulb" value={fmt(S.dThetaBulb, 3)} unit="–" />
+                <Stat label="Depth / root depth" value={fmt(W.zUse / rootD, 2)} unit="–" status={st(W.zUse / rootD <= 1.2, W.zUse / rootD <= 1.5)} />
                 <Stat label="Aspect z / (w/2)" value={fmt(W.A, 2)} unit="–" />
               </div>
               <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
                 <div className="xl:col-span-2">
                   <Panel title="Wetted bulb cross-section — vertical plane along the lateral" tone="soil">
-                    <BulbDrawing w={W.w} z={W.z} zOv={W.zOv} Se={Se} rootD={rootD}
+                    <BulbDrawing w={W.wUse} z={W.zUse} zOv={W.zOv} Se={Se} rootD={rootD}
                                  r0={FX.ponding ? FX.rW / 100 : r0 / 100} />
                   </Panel>
                 </div>
                 <div className="space-y-3">
-                  <Panel title="Two independent estimates" tone="water">
+                  <Panel title="Consistency check — implied water content" tone="water">
                     <p className="text-[11px] leading-relaxed text-slate-600">
-                      The empirical Schwartzman–Zur bulb and the mass-balance bulb (same aspect ratio, volume forced to
-                      V/Δθ) should agree within roughly 20 %. A large gap means Δθ or Ks is off — a parameter check,
-                      not a design result.
+                      Treating the Schwartzman–Zur bulb as a half-ellipsoid, the water applied must fit inside it.
+                      That fixes the volume-averaged water content the correlation implies:
                     </p>
-                    <div className="mt-2 font-mono text-[11px] text-slate-600">
-                      w: {fmt(W.w * 100, 0)} vs {fmt(W.wMB * 100, 0)} cm · z: {fmt(W.z * 100, 0)} vs {fmt(W.zMB * 100, 0)} cm
+                    <div className="mt-2 rounded bg-slate-50 px-2 py-1 font-mono text-[11px] text-slate-700">
+                      V<sub>bulb</sub> = ⅔π(w/2)²z = {fmt(W.VbulbSZ * 1000, 1)} L ·
+                      applied {fmt(W.Vtot * 1000, 2)} L
+                      <br />Δθ<sub>implied</sub> = {fmt(W.dThImplied, 4)} ·
+                      θ̄ = {fmt(S.thI + W.dThImplied, 4)} = {fmt(W.satFrac * 100, 0)} % of θ<sub>s</sub>
                     </div>
+                    <div className="mt-2">
+                      <Check pass={!W.inconsistent && W.satFrac > 0.35}>
+                        {W.inconsistent
+                          ? `Implied θ̄ = ${fmt(S.thI + W.dThImplied, 3)} exceeds porosity ${fmt(soil.ts, 3)} — the raw correlation predicts a bulb too small to hold the water applied.`
+                          : W.satFrac < 0.35
+                            ? `Implied θ̄ is only ${fmt(W.satFrac * 100, 0)} % of saturation, low for a bulb near an emitter. The correlation may be overestimating the bulb here.`
+                            : `Implied θ̄ is ${fmt(W.satFrac * 100, 0)} % of saturation — plausible for a wetted bulb.`}
+                      </Check>
+                    </div>
+                    {W.inconsistent && (
+                      <div className="mt-2 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-900">
+                        <strong>Corrected automatically.</strong> The aspect ratio A = {fmt(W.A, 3)} is the robust part
+                        of the correlation, so it is kept and the size rescaled until mass balance holds exactly:
+                        <div className="mt-1 font-mono text-[10px]">
+                          a = [3V / (2πA·Δθ)]<sup>1/3</sup>, Δθ = θ<sub>FC</sub> − θ<sub>i</sub> = {fmt(W.dThFC, 4)}
+                        </div>
+                        <div className="mt-1 font-mono">
+                          raw S&amp;Z {fmt(W.w * 100, 0)} × {fmt(W.z * 100, 0)} cm →
+                          corrected <strong>{fmt(W.wCorr * 100, 0)} × {fmt(W.zCorr * 100, 0)} cm</strong>
+                        </div>
+                        Δθ is taken to field capacity, i.e. the drained bulb the roots see between irrigations, which is
+                        the design-relevant one. Every overlap and spacing figure on this tab now uses the corrected
+                        dimensions. Confirm with a numerical solution before publishing.
+                      </div>
+                    )}
+                    <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
+                      This is a genuine test with nothing to tune. Schwartzman &amp; Zur was fitted on mineral field
+                      soils; on engineered substrates such as wood fibre or peat an implausible θ̄ is the signal that
+                      the correlation does not transfer, and that the bulb should be computed numerically instead.
+                    </p>
                   </Panel>
+                  <OverlapDesigner W={W} Se={Se} setSe={setSe} rootD={rootD}
+                                   qn={qn} setQn={setQn} tset={SCH.designHours}
+                                   ovTarget={ovTarget} setOvTarget={setOvTarget}
+                                   ovMode={ovMode} setOvMode={setOvMode}
+                                   plantSp={plantSp} setPlantSp={setPlantSp}
+                                   Ks_mh={S.Ks_mh} Sr={Sr}
+                                   TAW={1000 * S.awc * rootD * fwMan} Ea={SCH.effy} fmt={fmt} />
                   <Panel title="Overlap between adjacent bulbs" tone="soil">
-                    <Row k="Normalised spacing Sₑ/w" v={fmt(W.k, 3)} hint={W.k >= 1 ? "no overlap" : "overlapping"} />
+                    <Row k="Normalised spacing Sₑ/w" v={fmt(W.kTrue, 3)}
+                         hint={W.kTrue >= 1 ? "≥ 1, no overlap" : "overlapping"} />
                     <Row k="Lens width w − Sₑ" v={`${fmt(W.wOv * 100, 0)} cm`} />
                     <Row k="Merge depth z_ov" v={`${fmt(W.zOv * 100, 0)} cm`} hint={`${fmt(100 * W.zOv / Math.max(W.z, 1e-6), 0)} % of z`} />
                     <Row k="Dry wedge below join" v={`${fmt(W.notch * 100, 0)} cm`} />
@@ -1140,7 +1257,9 @@ export default function DripDesign() {
                       <Check pass={W.zOv >= rootD}>
                         {W.zOv >= rootD
                           ? `Continuous wetted strip through the whole ${fmt(rootD * 100, 0)} cm root zone`
-                          : `Strip is continuous only to ${fmt(W.zOv * 100, 0)} cm — a dry wedge sits between emitters below that. Close Sₑ to ${fmt(W.seForDepth(rootD), 2)} m${W.z > rootD ? "" : ", or lengthen the set, since z itself is shallower than the root zone"}`}
+                          : W.z <= rootD
+                            ? `Bulb depth z = ${fmt(W.z * 100, 0)} cm is itself shallower than the ${fmt(rootD * 100, 0)} cm root zone, so no emitter spacing can join the bulbs at that depth. Lengthen the set or raise the emitter discharge.`
+                            : `Strip is continuous only to ${fmt(W.zOv * 100, 0)} cm — a dry wedge sits between emitters below that. Close Sₑ to ${fmt(W.seForDepth(rootD), 2)} m to join at root depth.`}
                       </Check>
                       <Check pass={W.areaFrac <= 0.35}>
                         {W.areaFrac <= 0.35
@@ -1169,6 +1288,8 @@ export default function DripDesign() {
                 <Stat label="Block area" value={fmt(F.areaBlock, 3)} unit="ha" />
                 <Stat label="Nutrient per event" value={fmt(F.nutrient, 2)} unit="kg N" />
                 <Stat label="Season N (all events)" value={fmt(F.seasonN, 1)} unit="kg N" />
+                <Stat label="Season N per hectare" value={fmt(F.seasonNha, 0)} unit="kg N/ha"
+                      status={st(F.seasonNha <= 400, F.seasonNha <= 600)} />
                 <Stat label="Product mass" value={fmt(F.product, 2)} unit="kg" />
                 <Stat label="Stock volume" value={fmt(F.stockVol, 1)} unit="L" />
                 <Stat label="Injection window" value={fmt(F.injMin, 0)} unit="min" />
@@ -1181,6 +1302,17 @@ export default function DripDesign() {
                   <li><span className="font-mono text-cyan-800">{fmt(SCH.designHours * 15, 0)} – {fmt(SCH.designHours * 45, 0)} min</span> — inject at {fmt(F.injRate, 1)} L/h.</li>
                   <li><span className="font-mono text-cyan-800">{fmt(SCH.designHours * 45, 0)} – {fmt(SCH.designHours * 60, 0)} min</span> — clear water, flushing the lines and centring the pulse.</li>
                 </ol>
+                {F.seasonNha > 400 && (
+                  <div className="mt-3 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-900">
+                    <strong>{fmt(F.seasonNha, 0)} kg N/ha over the season is implausible.</strong> Typical field-crop
+                    demand is 100–300 kg N/ha. The dose is applied at every one of the {SCH.events.length} scheduled
+                    events, so a short irrigation interval multiplies it. Either reduce the per-event rate to about
+                    {" "}{fmt(200 / Math.max(SCH.events.length, 1), 1)} kg/ha for a 200 kg/ha season total, or fertigate
+                    on only a fraction of the events. Check the irrigation interval on the Crop water use tab first — an
+                    interval near one day usually means the managed wetted fraction is set too high relative to the
+                    wetted fraction P computed from the bulb.
+                  </div>
+                )}
                 <p className="mt-3 text-[11px] leading-relaxed text-slate-600">
                   Applying this dose at every one of the {SCH.events.length} scheduled events gives {fmt(F.seasonN, 1)} kg N
                   on the block over the season. Match that against the crop's uptake curve rather than dosing uniformly —
@@ -1199,6 +1331,349 @@ export default function DripDesign() {
         integrated matric flux potential; source radius from Wooding (1968); bulb geometry from Schwartzman &amp; Zur
         (1986) cross-checked against mass balance. Screening tools — confirm with an axisymmetric Richards solution.
       </footer>
+    </div>
+  );
+}
+
+/* ---------------- overlap designer: inverse problem ---------------- */
+
+function OverlapDesigner({ W, Se, setSe, rootD, qn, setQn, tset,
+                           ovTarget, setOvTarget, ovMode, setOvMode,
+                           plantSp, setPlantSp, Ks_mh, Sr, TAW, Ea, fmt }) {
+  const w = W.wUse, z = W.zUse;
+
+  let kReq = null, note = "";
+  if (ovMode === "area") {
+    kReq = W.kForArea(ovTarget / 100);
+  } else if (ovMode === "depth") {
+    const target = ovTarget / 100;
+    kReq = z > target ? Math.sqrt(Math.max(0, 1 - Math.pow(target / z, 2))) : null;
+    if (kReq === null) note = `Bulb depth z = ${fmt(z * 100, 0)} cm is shallower than the ${fmt(target * 100, 0)} cm target, so no spacing reaches it.`;
+  } else {
+    const target = ovTarget / 100;
+    kReq = target < w ? (w - target) / w : null;
+    if (kReq === null) note = `A lens wider than the bulb itself (${fmt(w * 100, 0)} cm) is impossible.`;
+  }
+
+  const seReq = kReq === null ? null : kReq * w;
+
+  /* Search the real product catalogue. Changing the emitter changes the bulb,
+     so each candidate must be evaluated with its own discharge.               */
+  const wFor = (q, t) => {
+    const Q = q / 1000, V = Q * t;
+    return 1.82 * Math.pow(V, 0.22) * Math.pow(Q / Ks_mh, 0.17);
+  };
+  const targetF = ovMode === "area" ? ovTarget / 100 : null;
+  const candidates = DRIPLINE_PRODUCTS.map(([sp, q]) => {
+    const wq = wFor(q, Math.max(tset, 0.01));
+    const f = W.fovOf(Math.min(1, sp / wq));
+    const r = plantSp / sp;
+    const alignedC = r >= 1 && Math.abs(r - Math.round(r)) < 0.02;
+    const perM = q / sp;                        // L/h per metre of lateral
+    const I = q / (sp * Sr);                    // mm/h application rate
+    return { sp, q, w: wq, f, aligned: alignedC, perPlant: Math.round(r), perM, I };
+  }).filter((c) => c.aligned && c.perPlant >= 1);
+
+  // best = meets the target with the widest spacing (fewest emitters); else the closest
+  const meeting = candidates.filter((c) => targetF === null || c.f >= targetF);
+  const pick = meeting.length
+    ? meeting.reduce((a, b) => (b.sp > a.sp ? b : a))
+    : (candidates.length ? candidates.reduce((a, b) => (b.f > a.f ? b : a)) : null);
+  const meetsTarget = pick !== null && targetF !== null && pick.f >= targetF;
+
+  const snap = pick ? pick.sp : null;
+  const fovAtSnap = pick ? pick.f : null;
+  const emInt = pick ? pick.perPlant : null;
+  const isAligned = pick ? pick.aligned : false;
+  const emCount = pick ? plantSp / pick.sp : null;
+  const emPerPlant = emCount;
+  const drift = 0;
+
+  // if emitter spacing is forced to equal plant spacing, what emitter is needed?
+  const wNeededSp = kReq === null ? null : plantSp / kReq;
+  const ratioSp = wNeededSp === null ? null : wNeededSp / w;
+  // w = 1.82 q^0.39 t^0.22 Ks^-0.17  ->  invert for q  (q in m3/h, w in m)
+  const qForW = (wt, t) =>
+    Math.pow(wt / (1.82 * Math.pow(t, 0.22) * Math.pow(Ks_mh, -0.17)), 1 / 0.39) * 1000;
+  const qNeeded = wNeededSp === null ? null : qForW(wNeededSp, Math.max(tset, 0.01));
+  // Route B must obey the same limits the feasibility search uses
+  const areaPerEmitter = plantSp * Sr;
+  const VmaxB = (TAW / Math.max(Ea, 0.01)) * areaPerEmitter;      // litres
+  const VB = qNeeded === null ? null : qNeeded * tset;
+  const zB = qNeeded === null ? null
+    : 2.54 * Math.pow((qNeeded / 1000) * tset, 0.63) * Math.pow(Ks_mh / (qNeeded / 1000), 0.45);
+  const volOK = VB !== null && VB <= VmaxB * 1.02;
+  const depthOK = zB !== null && zB <= rootD * 1.02;
+  const qOK = qNeeded !== null && qNeeded <= 16;
+  const spFeasible = volOK && depthOK && qOK;
+
+  const modes = [["area", "Overlap area %"], ["depth", "Merge depth cm"], ["lens", "Lens width cm"]];
+
+  return (
+    <Panel title="Overlap designer — work backwards from a target" tone="water">
+      <div className="mb-2 flex flex-wrap gap-1">
+        {modes.map(([id, lb]) => (
+          <button key={id} onClick={() => {
+              setOvMode(id);
+              setOvTarget(id === "area" ? 25 : id === "depth" ? Math.round(rootD * 100) : 15);
+            }}
+            className={`rounded border px-2 py-1 text-[10px] font-medium uppercase tracking-wider transition-colors ${
+              ovMode === id ? "border-cyan-700 bg-cyan-50 text-cyan-800"
+                            : "border-slate-300 text-slate-500 hover:text-slate-800"}`}>
+            {lb}
+          </button>
+        ))}
+      </div>
+
+      <label className="flex items-center justify-between gap-3 py-1">
+        <span className="text-xs text-slate-600">
+          Target {ovMode === "area" ? "overlap area" : ovMode === "depth" ? "merge depth" : "lens width"}
+          {" "}<span className="text-slate-400">[{ovMode === "area" ? "%" : "cm"}]</span>
+        </span>
+        <input type="number" step={ovMode === "area" ? 5 : 1} value={ovTarget}
+          onChange={(e) => setOvTarget(parseFloat(e.target.value))}
+          onWheel={(e) => e.currentTarget.blur()}
+          className="w-24 shrink-0 rounded border border-slate-300 bg-white px-2 py-1 text-right font-mono text-xs focus:border-cyan-600 focus:outline-none focus:ring-1 focus:ring-cyan-600" />
+      </label>
+      <label className="flex items-center justify-between gap-3 py-1">
+        <span className="text-xs text-slate-600">Plant spacing in the row <span className="text-slate-400">[m]</span></span>
+        <input type="number" step={0.05} value={plantSp}
+          onChange={(e) => setPlantSp(parseFloat(e.target.value))}
+          onWheel={(e) => e.currentTarget.blur()}
+          className="w-24 shrink-0 rounded border border-slate-300 bg-white px-2 py-1 text-right font-mono text-xs focus:border-cyan-600 focus:outline-none focus:ring-1 focus:ring-cyan-600" />
+      </label>
+
+      {note ? (
+        <div className="mt-2 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">{note}</div>
+      ) : (
+        <>
+          <FeasibilityCheck W={W} plantSp={plantSp} rootD={rootD} Ks_mh={Ks_mh}
+                            target={ovMode === "area" ? ovTarget / 100 : null}
+                            qn={qn} setQn={setQn} setSe={setSe} snap={snap}
+                            emPerPlant={emPerPlant} TAW={TAW} Ea={Ea} Sr={Sr} fmt={fmt} />
+          <div className={`mt-3 rounded border px-3 py-2 ${meetsTarget ? "border-cyan-300 bg-cyan-50" : "border-amber-300 bg-amber-50"}`}>
+            <div className="text-[10px] uppercase tracking-wider text-cyan-800">
+              Route A — choose a real dripline product
+            </div>
+            {pick ? (
+              <>
+                <div className="mt-1 font-mono text-lg text-slate-900">
+                  Sₑ = {fmt(pick.sp, 2)} m @ {fmt(pick.q, 1)} L/h
+                  <span className="ml-2 text-xs text-slate-500">
+                    ({fmt(pick.perM, 1)} L/h per m of lateral)
+                  </span>
+                </div>
+                <div className="mt-1 text-[11px] text-slate-600">
+                  bulb {fmt(pick.w * 100, 0)} cm wide → <strong>{fmt(pick.f * 100, 1)} % overlap</strong> ·
+                  {" "}exactly {pick.perPlant} emitter{pick.perPlant > 1 ? "s" : ""} per plant ·
+                  {" "}application rate {fmt(pick.I, 2)} mm/h
+                </div>
+                {!meetsTarget && targetF !== null && (
+                  <p className="mt-1 text-[11px] leading-relaxed text-amber-900">
+                    This is the best real product available; it reaches {fmt(pick.f * 100, 1)} % against your
+                    {" "}{fmt(targetF * 100, 0)} % target. No catalogue dripline that divides {fmt(plantSp, 2)} m
+                    can do better on this soil.
+                  </p>
+                )}
+                <p className="mt-2 text-[11px] leading-relaxed text-slate-600">
+                  {fmt(pick.sp, 2)} m divides {fmt(plantSp, 2)} m exactly, so the pattern repeats with no drift.
+                  Note the discharge changes with the spacing — real dripline delivers 4–12 L/h per metre of
+                  lateral, so a close spacing must carry a small emitter. Keeping {fmt(qn, 1)} L/h at
+                  {" "}{fmt(pick.sp, 2)} m would mean {fmt(qn / pick.sp, 0)} L/h per metre, which no manufacturer
+                  supplies and which would overrun the lateral velocity limit.
+                </p>
+                <button onClick={() => { setSe(pick.sp); setQn(pick.q); }}
+                  className="mt-2 rounded bg-cyan-700 px-3 py-1 text-[11px] font-medium text-white hover:bg-cyan-800">
+                  Apply {fmt(pick.sp, 2)} m @ {fmt(pick.q, 1)} L/h
+                </button>
+              </>
+            ) : (
+              <p className="mt-1 text-[11px] text-amber-900">
+                No catalogue dripline divides {fmt(plantSp, 2)} m evenly. Adjust the plant spacing, or accept
+                emitters that drift relative to the plants.
+              </p>
+            )}
+          </div>
+
+          <div className={`mt-2 rounded border px-3 py-2 ${spFeasible ? "border-slate-300 bg-slate-50" : "border-amber-300 bg-amber-50"}`}>
+            <div className="text-[10px] uppercase tracking-wider text-slate-600">
+              Route B — one emitter per plant, Sₑ = {fmt(plantSp, 2)} m
+            </div>
+            <div className="mt-1 text-[11px] leading-relaxed text-slate-700">
+              The bulb would have to widen from {fmt(w * 100, 0)} to {fmt(wNeededSp * 100, 0)} cm
+              (factor {fmt(ratioSp, 2)}), which needs <strong>{fmt(qNeeded, 1)} L/h</strong> emitters at the
+              current {fmt(tset, 2)} h set — {fmt(VB, 2)} L per emitter, bulb depth {fmt(zB * 100, 0)} cm.
+            </div>
+            <div className="mt-2 space-y-0.5 text-[11px]">
+              <div className={qOK ? "text-slate-600" : "text-red-700"}>
+                {qOK ? "✓" : "✗"} discharge {fmt(qNeeded, 1)} L/h {qOK ? "within" : "above"} the 16 L/h drip limit
+              </div>
+              <div className={volOK ? "text-slate-600" : "text-red-700"}>
+                {volOK ? "✓" : "✗"} event {fmt(VB, 2)} L = {fmt(VB / areaPerEmitter, 1)} mm
+                {volOK ? " fits" : ` is ${fmt(VB / VmaxB, 1)}× `} the soil's storage (TAW {fmt(TAW, 2)} mm,
+                limit {fmt(VmaxB, 2)} L)
+              </div>
+              <div className={depthOK ? "text-slate-600" : "text-red-700"}>
+                {depthOK ? "✓" : "✗"} front at {fmt(zB * 100, 0)} cm
+                {depthOK ? " stays inside" : ` is ${fmt((zB - rootD) * 100, 0)} cm below`} the
+                {" "}{fmt(rootD * 100, 0)} cm root zone
+              </div>
+            </div>
+            {spFeasible ? (
+              <button onClick={() => { setSe(+plantSp.toFixed(2)); setQn(+qNeeded.toFixed(2)); }}
+                className="mt-2 rounded border border-slate-400 px-3 py-1 text-[11px] font-medium text-slate-700 hover:bg-white">
+                Apply {fmt(plantSp, 2)} m spacing with {fmt(qNeeded, 1)} L/h
+              </button>
+            ) : (
+              <p className="mt-2 text-[11px] leading-relaxed text-amber-900">
+                <strong>Not a valid option.</strong>{" "}
+                {!qOK && "Above roughly 16 L/h this is a micro-sprinkler or bubbler, not drip. "}
+                {!volOK && `The event would be ${fmt(VB / VmaxB, 1)}× what the root zone can hold, so most of it drains straight past the roots. `}
+                {!depthOK && `The wetting front would reach ${fmt(zB * 100, 0)} cm, ${fmt((zB - rootD) * 100, 0)} cm below the root zone. `}
+                Use Route A, add pulses, or accept separate bulbs with one emitter at each plant.
+              </p>
+            )}
+          </div>
+
+          <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
+            Duration is the weak lever: w ∝ t<sup>0.22</sup> but z ∝ t<sup>0.63</sup>, so running longer mostly
+            drives water below the root zone. Discharge is stronger (w ∝ q<sup>0.39</sup>). Pulsing raises w/z for
+            the same volume — set it on the left and re-read this panel.
+          </p>
+        </>
+      )}
+
+      <div className="mt-3 border-t border-dashed border-slate-200 pt-2">
+        <div className="mb-1 text-[10px] uppercase tracking-wider text-slate-400">Reference — overlap area vs spacing</div>
+        <table className="w-full text-[11px]">
+          <thead>
+            <tr className="text-left text-[9px] uppercase tracking-wider text-slate-500">
+              <th className="py-0.5">Overlap</th><th className="py-0.5 text-right">Sₑ/w</th>
+              <th className="py-0.5 text-right">Sₑ (m)</th><th className="py-0.5 text-right">commercial</th>
+              <th className="py-0.5 text-right">per plant</th><th className="py-0.5 text-right">merge depth</th>
+            </tr>
+          </thead>
+          <tbody className="font-mono text-slate-700">
+            {[0.10, 0.20, 0.25, 0.30, 0.40, 0.45, 0.50, 0.60].map((f) => {
+              const kk = W.kForArea(f);
+              const ex = kk * w;
+              const al = DRIPLINE_SE.filter((v) => {
+                const r = plantSp / v;
+                return v <= ex + 1e-9 && r >= 1 && Math.abs(r - Math.round(r)) < 0.02;
+              });
+              const sn = al.length ? al[al.length - 1]
+                : (DRIPLINE_SE.filter((v) => v <= ex + 1e-9).pop() ?? DRIPLINE_SE[0]);
+              const nEm = plantSp / sn;
+              const aligned2 = Math.abs(nEm - Math.round(nEm)) < 0.02;
+              return (
+                <tr key={f} className="border-t border-slate-100">
+                  <td className="py-0.5 font-sans">{(f * 100).toFixed(0)} %</td>
+                  <td className="py-0.5 text-right">{fmt(kk, 3)}</td>
+                  <td className="py-0.5 text-right">{fmt(ex, 3)}</td>
+                  <td className="py-0.5 text-right">{fmt(sn, 2)}</td>
+                  <td className={`py-0.5 text-right ${aligned2 ? "" : "text-amber-700"}`}>
+                    {aligned2 ? Math.round(nEm) : fmt(nEm, 2)}</td>
+                  <td className="py-0.5 text-right">{fmt(z * Math.sqrt(1 - kk * kk) * 100, 0)} cm</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
+          Typical targets: <strong>15–25 %</strong> for row crops needing a continuous strip;
+          <strong> 40–50 %</strong> where a fully wetted bed is wanted, or under salinity where a leached strip
+          matters — common in sandy soils and in greenhouse vegetable production;
+          <strong> 0 %</strong> for widely spaced orchard trees where separate bulbs are intended.
+          Higher overlap costs emitters and increases drainage at the midpoint.
+        </p>
+      </div>
+    </Panel>
+  );
+}
+
+/* ---- can the three constraints hold together? ---- */
+
+function FeasibilityCheck({ W, plantSp, rootD, Ks_mh, target, qn, setQn, setSe,
+                            snap, emPerPlant, TAW, Ea, Sr, fmt }) {
+  if (target === null) return null;
+
+  const wOf = (q, t, N) => {
+    const Q = q / 1000, V = (Q * t) / N;
+    return 1.82 * Math.pow(V, 0.22) * Math.pow(Q / Ks_mh, 0.17) * Math.pow(N, 0.07);
+  };
+  const zOf = (q, t, N) => {
+    const Q = q / 1000, V = (Q * t) / N;
+    return 2.54 * Math.pow(V, 0.63) * Math.pow(Ks_mh / Q, 0.45) * Math.pow(N, 0.18);
+  };
+
+  /* Agronomic ceiling: an event cannot usefully exceed what the managed root
+     zone can hold. Anything beyond TAW drains past the roots.               */
+  const areaPerEmitter = plantSp * Sr;                       // m2
+  const Vmax = (TAW / Math.max(Ea, 0.01)) * areaPerEmitter;  // litres per emitter
+  const depthOf = (V) => V / Math.max(areaPerEmitter, 1e-6); // mm gross
+
+  let best = 0, bestCfg = null;
+  for (const q of [1, 2, 4, 6, 8, 12, 16]) {
+    for (const N of [1, 2, 4, 6]) {
+      // longest set that satisfies BOTH the depth limit and the volume limit
+      const tVol = Vmax / q;
+      let lo = 0.02, hi = Math.min(48, tVol);
+      if (hi <= lo) continue;
+      for (let i = 0; i < 60; i++) {
+        const mid = (lo + hi) / 2;
+        if (zOf(q, mid, N) <= rootD) lo = mid; else hi = mid;
+      }
+      if (lo <= 0.03) continue;
+      const ov = W.fovOf(Math.min(1, plantSp / wOf(q, lo, N)));
+      if (ov > best) { best = ov; bestCfg = { q, N, t: lo, V: q * lo, w: wOf(q, lo, N), z: zOf(q, lo, N) }; }
+    }
+  }
+
+  const ok = best >= target;
+  return (
+    <div className={`mt-3 rounded border px-3 py-2 ${ok ? "border-emerald-300 bg-emerald-50" : "border-red-300 bg-red-50"}`}>
+      <div className={`text-[10px] uppercase tracking-wider ${ok ? "text-emerald-800" : "text-red-800"}`}>
+        Feasibility — one emitter per plant at {fmt(plantSp, 2)} m
+      </div>
+      <div className="mt-1 font-mono text-[10px] text-slate-500">
+        constraints: q ≤ 16 L/h · z ≤ {fmt(rootD * 100, 0)} cm · event ≤ TAW = {fmt(TAW, 2)} mm
+        (V ≤ {fmt(Vmax, 2)} L per emitter)
+      </div>
+      {ok && bestCfg ? (
+        <p className="mt-1 text-[11px] leading-relaxed text-slate-700">
+          Achievable. Up to <strong>{fmt(best * 100, 1)} %</strong> overlap while keeping the front inside the root
+          zone and the event within the soil's storage — at {bestCfg.q} L/h, {bestCfg.N} pulse{bestCfg.N > 1 ? "s" : ""},
+          {" "}{fmt(bestCfg.t, 2)} h ({fmt(bestCfg.V, 2)} L = {fmt(depthOf(bestCfg.V), 1)} mm,
+          bulb {fmt(bestCfg.w * 100, 0)} × {fmt(bestCfg.z * 100, 0)} cm).
+          <button onClick={() => { setQn(bestCfg.q); setSe(+plantSp.toFixed(2)); }}
+            className="ml-2 rounded border border-emerald-500 px-2 py-0.5 text-[10px] font-medium text-emerald-800 hover:bg-white">
+            Apply
+          </button>
+        </p>
+      ) : (
+        <>
+          <p className="mt-1 text-[11px] leading-relaxed text-slate-700">
+            <strong>Not achievable on this soil.</strong> The most reachable at {fmt(plantSp, 2)} m spacing is
+            {" "}<strong>{fmt(best * 100, 1)} %</strong> against your {fmt(target * 100, 0)} % target
+            {bestCfg && <> ({bestCfg.q} L/h, {fmt(bestCfg.t, 2)} h, {fmt(bestCfg.V, 2)} L, bulb
+              {" "}{fmt(bestCfg.w * 100, 0)} × {fmt(bestCfg.z * 100, 0)} cm)</>}.
+            A wider bulb needs more water, and on a soil this coarse the extra water goes down rather than sideways —
+            width grows as V<sup>0.22</sup> but depth as V<sup>0.63</sup>.
+          </p>
+          <div className="mt-2 text-[11px] leading-relaxed text-slate-700">
+            One of the constraints has to give:
+            <ul className="mt-1 space-y-1">
+              <li>• <strong>Drop “one emitter per plant”</strong> — use {fmt(snap, 2)} m dripline,
+                {" "}{Math.round(emPerPlant)} emitters per plant. The normal answer on sandy soils, and agronomically free.</li>
+              <li>• <strong>Accept {fmt(best * 100, 0)} % overlap</strong>, treating each plant as a separate bulb.</li>
+              <li>• <strong>Irrigate less often with larger events</strong> — raises TAW's role but only if the root zone
+                can store it. On this soil TAW is just {fmt(TAW, 2)} mm, which is why events must stay small.</li>
+              <li>• <strong>Accept deep percolation</strong> — reachable, but the front passes the root zone and leaches
+                nitrate. Defensible only where leaching is wanted for salinity control.</li>
+            </ul>
+          </div>
+        </>
+      )}
     </div>
   );
 }
