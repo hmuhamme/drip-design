@@ -6,7 +6,7 @@ authors:
   - family-names: Muhammed
     given-names: Hadi Hamaaziz
     affiliation: Universität Osnabrück
-    https://orcid.org/0000-0003-3875-2585
+    orcid: https://orcid.org/0000-0003-3875-2585
 version: 1.0.0
 date-released: '2026-08-09'
 license: MIT
