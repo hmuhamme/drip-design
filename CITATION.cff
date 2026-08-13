@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+title: Drip Irrigation Design Workbench
+message: If you use this software, please cite it as below.
+type: software
+authors:
+  - family-names: Muhammed
+    given-names: Hadi Hamaaziz
+    affiliation: Universität Osnabrück
+    https://orcid.org/my-orcid?orcid=0000-0003-3875-2585
+version: 1.0.0
+date-released: 2026-08-09
+license: CC-BY-NC-4.0
+repository-code: https://github.com/hmuhamme/drip-design
+url: https://drip-design-osnabrueck.netlify.app
+abstract: >-
+  An interactive design tool for surface drip irrigation, covering
+  hydraulic network design, crop water demand and scheduling,
+  van Genuchten-Mualem soil hydraulics, wetting-front geometry and
+  emitter overlap, and fertigation.
+keywords:
+  - drip irrigation
+  - irrigation design
+  - soil water
+  - van Genuchten
+  - emission uniformity
